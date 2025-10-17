@@ -161,6 +161,16 @@ class Database:
         cursor.execute("SELECT id, account_number, account_name, account_type FROM accounts")
         return [dict(row) for row in cursor.fetchall()]
     
+    def update_account_name(self, account_number: str, custom_name: str) -> bool:
+        """Update the custom name for an account."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "UPDATE accounts SET account_name = ? WHERE account_number = ?",
+            (custom_name, account_number)
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+    
     def close(self):
         """Close database connection."""
         self.conn.close()

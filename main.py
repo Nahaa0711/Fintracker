@@ -2,7 +2,14 @@
 """FinTrack - CIBC Finance Tracker CLI"""
 import sys
 import os
+import io
 from pathlib import Path
+
+# Set UTF-8 encoding for Windows Unicode support
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 try:
     from dotenv import load_dotenv
@@ -100,8 +107,18 @@ def sync_to_sheets(db: Database):
         accounts = db.get_accounts()
         
         for account in accounts:
+            account_name = account.get('account_name')
+            display_name = account_name if account_name else account['account_number']
+            print(f"📋 Syncing account: {display_name}")
             transactions = db.get_transactions(account_id=account['id'])
-            sheets.sync_transactions(transactions, account['account_number'])
+            
+            # Debug: Show category info for first few transactions
+            print(f"   Found {len(transactions)} transactions")
+            if transactions:
+                sample_tx = transactions[0]
+                print(f"   Sample transaction categories: parent='{sample_tx.get('parent_category', 'None')}', category='{sample_tx.get('category', 'None')}'")
+            
+            sheets.sync_transactions(transactions, account['account_number'], account_name)
         
         print("\n✓ Sync complete!")
         
@@ -178,6 +195,136 @@ def init_categories(categorizer: Categorizer):
     categorizer.initialize_default_categories()
     print("✓ Default categories added!")
 
+def recategorize_all(db: Database, categorizer: Categorizer):
+    """Recategorize all uncategorized transactions."""
+    print("🔄 Recategorizing all transactions...")
+    
+    # Get all uncategorized transactions
+    cursor = db.conn.cursor()
+    cursor.execute("SELECT id, description FROM transactions WHERE category_id IS NULL")
+    uncategorized = cursor.fetchall()
+    
+    if not uncategorized:
+        print("✓ All transactions are already categorized!")
+        return
+    
+    print(f"Found {len(uncategorized)} uncategorized transactions")
+    
+    updated_count = 0
+    for tx_id, description in uncategorized:
+        category_id = categorizer.categorize(description)
+        if category_id:
+            cursor.execute("UPDATE transactions SET category_id = ? WHERE id = ?", (category_id, tx_id))
+            updated_count += 1
+            print(f"✓ Categorized: {description[:50]}...")
+    
+    db.conn.commit()
+    print(f"✓ Updated {updated_count} transactions with categories")
+
+def debug_categories(db: Database, categorizer: Categorizer):
+    """Debug category information."""
+    print("\n=== Category Debug ===\n")
+    
+    # Show all categories
+    categories = db.get_categories()
+    print(f"Total categories in database: {len(categories)}")
+    
+    if not categories:
+        print("No categories found! Run: python main.py init-categories")
+        return
+    
+    # Show category tree
+    tree = categorizer.get_category_tree()
+    print("\nCategory structure:")
+    for parent, children in tree.items():
+        print(f"  {parent}")
+        for child in children:
+            print(f"     - {child}")
+    
+    # Show uncategorized count
+    uncategorized = db.get_uncategorized_count()
+    print(f"\nUncategorized transactions: {uncategorized}")
+    
+    # Show sample transactions
+    transactions = db.get_transactions(limit=5)
+    print(f"\nSample transactions:")
+    for tx in transactions:
+        print(f"  {tx['date']} | {tx['description'][:30]}... | {tx.get('parent_category', 'None')} | {tx.get('category', 'None')}")
+    
+    # Test categorization on sample transactions
+    print(f"\nTesting categorization on sample transactions:")
+    for tx in transactions[:3]:  # Test first 3
+        print(f"\nTransaction: {tx['description']}")
+        category_id = categorizer.categorize(tx['description'], debug=True)
+        if category_id:
+            # Find category name
+            for cat in categories:
+                if cat['id'] == category_id:
+                    print(f"  Result: {cat['name']}")
+                    break
+        else:
+            print(f"  Result: No match")
+
+def list_accounts(db: Database):
+    """List all accounts with their names."""
+    print("\n=== Accounts ===\n")
+    
+    accounts = db.get_accounts()
+    if not accounts:
+        print("No accounts found!")
+        return
+    
+    for i, account in enumerate(accounts, 1):
+        name = account['account_name'] or "Unnamed"
+        print(f"{i}. {account['account_number']}")
+        print(f"   Name: {name}")
+        print(f"   Type: {account['account_type']}")
+        print()
+
+def set_account_name(db: Database, account_number: str = None, new_name: str = None):
+    """Set custom name for an account."""
+    print("\n=== Set Account Name ===\n")
+    
+    accounts = db.get_accounts()
+    if not accounts:
+        print("No accounts found!")
+        return
+    
+    # If account_number and new_name provided via command line
+    if account_number and new_name:
+        if db.update_account_name(account_number, new_name):
+            print(f"✓ Updated account {account_number} name to: {new_name}")
+        else:
+            print(f"❌ Account {account_number} not found")
+        return
+    
+    # Interactive mode
+    print("Available accounts:")
+    for i, account in enumerate(accounts, 1):
+        name = account['account_name'] or "Unnamed"
+        print(f"{i}. {account['account_number']} - {name}")
+    
+    try:
+        choice = int(input("\nSelect account (number): ")) - 1
+        if choice < 0 or choice >= len(accounts):
+            print("❌ Invalid selection")
+            return
+        
+        account = accounts[choice]
+        new_name = input(f"Enter new name for {account['account_number']}: ").strip()
+        
+        if not new_name:
+            print("❌ Name cannot be empty")
+            return
+        
+        if db.update_account_name(account['account_number'], new_name):
+            print(f"✓ Updated account name to: {new_name}")
+        else:
+            print("❌ Failed to update account name")
+            
+    except (ValueError, KeyboardInterrupt, EOFError):
+        print("\n❌ Operation cancelled")
+
 
 def main():
     if len(sys.argv) < 2:
@@ -192,6 +339,11 @@ Usage:
   python main.py list-categories      List all categories
   python main.py stats                Show database statistics
   python main.py init-categories      Initialize default categories
+  python main.py recategorize         Recategorize all transactions
+  python main.py debug-categories     Debug category information
+  python main.py list-accounts        List all accounts
+  python main.py set-account-name     Set custom name for an account (interactive)
+  python main.py set-account-name <account_number> <name>  Set account name via command line
         """)
         return
     
@@ -225,6 +377,25 @@ Usage:
         
         elif command == "init-categories":
             init_categories(categorizer)
+        
+        elif command == "recategorize":
+            recategorize_all(db, categorizer)
+        
+        elif command == "debug-categories":
+            debug_categories(db, categorizer)
+        
+        elif command == "list-accounts":
+            list_accounts(db)
+        
+        elif command == "set-account-name":
+            if len(sys.argv) >= 4:
+                # Command line mode: python main.py set-account-name <account_number> <new_name>
+                account_number = sys.argv[2]
+                new_name = sys.argv[3]
+                set_account_name(db, account_number, new_name)
+            else:
+                # Interactive mode
+                set_account_name(db)
         
         else:
             print(f"❌ Unknown command: {command}")

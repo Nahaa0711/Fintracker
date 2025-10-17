@@ -13,9 +13,12 @@ class Categorizer:
         """Load categories from database into memory."""
         self.categories = self.db.get_categories()
     
-    def categorize(self, description: str) -> Optional[int]:
+    def categorize(self, description: str, debug: bool = False) -> Optional[int]:
         """Find matching category for transaction description."""
         description_lower = description.lower()
+        
+        if debug:
+            print(f"  Categorizing: {description}")
         
         # Try to match keywords
         for category in self.categories:
@@ -25,8 +28,12 @@ class Categorizer:
             keywords = json.loads(category['keywords'])
             for keyword in keywords:
                 if keyword.lower() in description_lower:
+                    if debug:
+                        print(f"    -> Matched '{keyword}' to {category['name']}")
                     return category['id']
         
+        if debug:
+            print(f"    -> No match found")
         return None  # Uncategorized
     
     def add_category_with_keywords(self, name: str, keywords: List[str], parent_name: Optional[str] = None) -> int:
